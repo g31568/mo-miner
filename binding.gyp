@@ -198,9 +198,8 @@
                 "-ffast-math",
                 "-fmerge-all-constants",
                 "/Qipo",
-                # icx-cl form of Linux's -axCORE-AVX2,CORE-AVX512,ROCKETLAKE: a portable SSE2 baseline plus
-                # AVX2/AVX-512/Rocketlake code paths chosen at runtime (icx multipath dispatch).
-                "/QaxCORE-AVX2,CORE-AVX512,ROCKETLAKE"
+                # This build requires the x86-64-v3 CPU feature baseline.
+                "/clang:-march=x86-64-v3"
               ]
             },
             "VCLinkerTool": {
@@ -380,6 +379,8 @@
               "AdditionalOptions": [
                 "/O2",
                 "/fsycl",
+                # Apply the same CPU baseline to the SYCL host code.
+                "/clang:-march=x86-64-v3",
                 "/clang:-fsycl-device-code-split=per_kernel",
                 "/DNDEBUG",
                 "/DPEARLHASH_ESIMD",

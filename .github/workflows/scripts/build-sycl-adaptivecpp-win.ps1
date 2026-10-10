@@ -67,6 +67,8 @@ $common = @('--acpp-targets=generic','-std=c++20','-O3','-ffp-contract=off','-DN
   '-DWIN32_LEAN_AND_MEAN','-fno-strict-aliasing',"-I$(Join-Path $RepoRoot 'xmrig')")
 if ($Backend -eq 'hip') { $common += '-D__HIP_PLATFORM_AMD__', "-I$HipPath\include" }
 if ($Backend -eq 'cuda' -and $CudaPath) { $common += "-I$CudaPath\include" }
+# Set the CPU baseline while keeping the generic GPU device target.
+$common += "-march=x86-64-v3"
 $sources = Get-MomWindowsSyclSources
 $objects = @()
 foreach ($entry in $sources.GetEnumerator()) {
@@ -82,11 +84,11 @@ foreach ($source in @('xmrig\base\crypto\sha3.cpp','xmrig\base\crypto\keccak.cpp
   $objects += $object
 }
 $blakeObject = Join-Path $obj 'blake2brx.obj'
-Invoke-Checked { & $clang -O3 -DNDEBUG -D_CRT_SECURE_NO_WARNINGS "-I$(Join-Path $RepoRoot 'xmrig')" -c `
+Invoke-Checked { & $clang -march=x86-64-v3 -O3 -DNDEBUG -D_CRT_SECURE_NO_WARNINGS "-I$(Join-Path $RepoRoot 'xmrig')" -c `
   'xmrig\crypto\randomx\blake2\blake2b.c' -o $blakeObject } 'compile blake2b.c'
 $objects += $blakeObject
 $hoohashObject = Join-Path $obj 'hoohash_host.obj'
-Invoke-Checked { & $clang -O2 -fno-fast-math -ffp-contract=off -fno-builtin -DNDEBUG `
+Invoke-Checked { & $clang -march=x86-64-v3 -O2 -fno-fast-math -ffp-contract=off -fno-builtin -DNDEBUG `
   -D_CRT_SECURE_NO_WARNINGS -c 'sycl\hoohash\host_math.c' -o $hoohashObject } 'compile hoohash host math'
 $objects += $hoohashObject
 

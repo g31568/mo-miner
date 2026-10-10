@@ -1026,6 +1026,11 @@ test("a donation window connects once and returns to normal mining on expiry", a
   const donationId = miner.global.opt.pool_ids.donate;
   assert.ok(donationId !== null && donationId !== undefined);
   const donation = requirePool(miner, donationId);
+  // Disabled donation must not open a connection even when called directly.
+  assert.equal(miner.global.opt.pool_time.donate_length, 0);
+  const connectsBefore = miner.poolConnects.length;
+  miner.startDonationWindow();
+  assert.equal(miner.poolConnects.length, connectsBefore);
   miner.global.opt.pool_time.donate_length = 0.01;
 
   miner.startDonationWindow();

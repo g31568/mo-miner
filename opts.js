@@ -90,7 +90,8 @@ module.exports.opt_help = {
     first_job_wait:    [ 15,     "consider pool bad if no first job after connection" ],
     close_wait:        [ 10,     "keep pool socket to submit delayed jobs" ],
     donate_interval:   [ 100*60, "time before donation pool is activated" ],
-    donate_length:     [ 1*60,   "donation pool work time" ],
+    // Zero donation time disables donation mining by default.
+    donate_length:     [ 0,      "donation pool work time (0 disables donation)" ],
     keepalive:         [ 5*60,   "interval to send keepalive messages" ],
   },
   pool: {
@@ -214,8 +215,9 @@ const timerOptions = new Set([
   "pool_time.donate_length", "pool_time.keepalive",
 ]);
 const positiveTimerOptions = new Set([
+  // Donation duration permits zero because it disables the window and timer.
   "pool_time.stats", "pool_time.primary_reconnect", "pool_time.first_job_wait",
-  "pool_time.donate_interval", "pool_time.donate_length", "pool_time.keepalive",
+  "pool_time.donate_interval", "pool_time.keepalive",
 ]);
 /** @type {Record<string, (arg: string, parsed: UnknownRecord, value: UnknownRecord) => UnknownRecord>} */
 const templateValidators = {

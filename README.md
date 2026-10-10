@@ -315,7 +315,8 @@ gpu1*[workgroup=256]^2
 
 # Mining
 
-Donation mining defaults to a 60-second window every 100 minutes through
+Donation mining defaults to 0 (disabled). A positive `pool_time.donate_length` enables
+donation windows every 100 minutes through
 `mom.moneroocean.stream`. It reuses the current algorithm when supported, including fixed
 PearlHash, or uses measured compatible MoneroOcean algorithms on the same selected devices.
 Donation mining is disabled when no compatible algorithm is available.

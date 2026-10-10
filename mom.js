@@ -311,6 +311,8 @@ if (!h.cluster_process()) {
   }
 
   function startDonationWindow() {
+    // A zero-length window must never connect to the donation pool.
+    if (global.opt.pool_time.donate_length <= 0) {return;}
     const poolId = global.opt.pool_ids.donate;
     if (poolId === null) {return;}
     const pool = global.opt.pools[poolId];
@@ -327,7 +329,8 @@ if (!h.cluster_process()) {
   }
 
   function scheduleDonationMining() {
-    if (global.opt.pool_ids.donate !== null) {
+    // Avoid creating a donation timer when donation is disabled.
+    if (global.opt.pool_ids.donate !== null && global.opt.pool_time.donate_length > 0) {
       setInterval(startDonationWindow, global.opt.pool_time.donate_interval * 1000);
     }
   }

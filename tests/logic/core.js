@@ -833,7 +833,7 @@ test("pool timers reject hot-loop values and delays beyond the Node timer limit"
   try {
     const positiveTimers = [
       "stats", "primary_reconnect", "first_job_wait",
-      "donate_interval", "donate_length", "keepalive",
+      "donate_interval", "keepalive",
     ];
     for (const timer of positiveTimers) {
       const current = opts.create_default_opts();
@@ -864,9 +864,11 @@ test("pool timers reject hot-loop values and delays beyond the Node timer limit"
     assert.throws(() => opts.parse_opt(
       bounded, opts.opt_help, "--pool_time.stats", "2147483.648", ""
     ), /maximum timer delay/);
-    assert.throws(() => opts.parse_opt(
+    // Donation duration accepts zero through nested configuration as well as CLI.
+    assert.equal(opts.parse_opt(
       bounded, opts.opt_help, "--pool_time", JSON.stringify({donate_length: 0}), ""
-    ), /pool_time\.donate_length param must be positive/);
+    ), true);
+    assert.equal(bounded.pool_time.donate_length, 0);
   } finally {
     opts.print_help = originalPrintHelp;
   }

@@ -108,6 +108,9 @@ if ($PortableOpencl) {
   $F += "-DMOM_PEARLHASH_HAS_ESIMD"
 }
 $H = @("-std=c++20","-O3","-DNDEBUG","-D_CRT_SECURE_NO_WARNINGS","-DMOM_SYCL_BUILD","-DNOMINMAX","-DWIN32_LEAN_AND_MEAN",$inc)
+# Set the CPU baseline for host code; SYCL device targets retain their own ISA.
+$F += "-march=x86-64-v3"
+$H += "-march=x86-64-v3"
 $targetList = @("spir64")
 if ($withCuda) {
   $targetList += $CudaArch
