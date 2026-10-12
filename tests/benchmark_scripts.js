@@ -503,8 +503,14 @@ test("development installer authenticates artifacts at their acquisition boundar
     /Download 'https:\/\/aka\.ms\/vs\/17\/release\/vs_BuildTools\.exe' \$installer\s+Assert-Authenticode \$installer/);
   assert.match(installer,
     /Download \$openClCpuUrl \$installer\s+Assert-Authenticode \$installer/);
-  assert.match(installer,
-    /Download \$cudaUrl \$installer\s+Assert-Authenticode \$installer/);
+  // CUDA redistributions use pinned checksums instead of an executable signature.
+  const cudaInstaller = fs.readFileSync(path.join(__dirname, "..", "scripts",
+    "install-cuda-13.4.2.ps1"), "utf8");
+  assert.match(installer, /install-cuda-13\.4\.2\.ps1/);
+  const checksum = cudaInstaller.indexOf("Get-FileHash $archive -Algorithm SHA256");
+  assert.ok(checksum > cudaInstaller.indexOf("Invoke-WebRequest"));
+  assert.ok(cudaInstaller.indexOf("Expand-Archive") > checksum);
+  assert.match(cudaInstaller, /throw "CUDA component checksum mismatch/);
   assert.match(helpers,
     /'--retry','5','--retry-all-errors','--retry-delay','5',[\s\S]*?'--continue-at','-','-o',\$OutFile,\$Url/);
   assert.match(installer,
