@@ -32,8 +32,8 @@ function Assert-Authenticode([string]$Path) {
 $tempRoot = if ($env:TEMP) { $env:TEMP } elseif ($env:TMPDIR) { $env:TMPDIR } else { "/tmp" }
 $fallbackCudaToolkitUrl = "https://developer.download.nvidia.com/compute/cuda/12.6.0/network_installers/cuda_12.6.0_windows_network.exe"
 $cudaToolkitRoot = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6"
-$cudaNvrtcUrl = "https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvrtc/windows-x86_64/cuda_nvrtc-windows-x86_64-13.1.115-archive.zip"
-$cudaNvrtcSha256 = "4ddd5a1e34fd62bb41e78c0725edfbf5609f4ecedd7fe118eddf2148b097fc91"
+$cudaNvrtcUrl = "https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvrtc/windows-x86_64/cuda_nvrtc-windows-x86_64-13.4.92-archive.zip"
+$cudaNvrtcSha256 = "92e4db6e79550665e1dbdc6cc09c934452a667881f5ed49a51681429874a8f0d"
 $openClCpuUrl = "https://registrationcenter-download.intel.com/akdlm/IRC_NAS/ad824c04-01c8-4ae5-b5e8-164a04f67609/w_opencl_runtime_p_2025.3.1.762.exe"
 $sevenZipUrl = "https://www.7-zip.org/a/7z2409-x64.msi"
 $sevenZipSha256 = "ec6af1ea0367d16dde6639a89a080a524cebc4d4bedfe00ed0cac4b865a918d8"
@@ -176,7 +176,7 @@ function Test-CudaToolkitReady {
 function Test-CudaNvrtc {
   param([Parameter(Mandatory = $true)][string]$CudaRoot)
   return ((Test-Path (Join-Path $CudaRoot "bin\nvrtc64_130_0.dll")) -and
-    (Test-Path (Join-Path $CudaRoot "bin\nvrtc-builtins64_131.dll")))
+    (Test-Path (Join-Path $CudaRoot "bin\nvrtc-builtins64_134.dll")))
 }
 
 function Install-CudaNvrtc {
@@ -200,7 +200,7 @@ function Install-CudaNvrtc {
   Add-Type -AssemblyName System.IO.Compression.FileSystem
   $zip = [System.IO.Compression.ZipFile]::OpenRead($archive)
   try {
-    foreach ($name in @("nvrtc64_130_0.dll", "nvrtc-builtins64_131.dll")) {
+    foreach ($name in @("nvrtc64_130_0.dll", "nvrtc-builtins64_134.dll")) {
       $entry = $zip.Entries | Where-Object { $_.Name -eq $name } | Select-Object -First 1
       if (-not $entry) { throw "CUDA NVRTC archive does not contain $name" }
       [System.IO.Compression.ZipFileExtensions]::ExtractToFile(

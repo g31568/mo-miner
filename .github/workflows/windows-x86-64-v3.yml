@@ -1,4 +1,4 @@
-name: Windows x86-64-v3 build
+name: Windows x86-64-v3 CUDA 13.4.2 build
 
 on:
   workflow_dispatch:
@@ -84,9 +84,27 @@ jobs:
       - name: Test NVIDIA release launcher without GPU libraries
         run: node --test tests/nvidia_compatibility.js
 
+  cuda-sdk-probe:
+    name: NVIDIA / CUDA 13.4.2 compiler probe
+    needs: windows-script-quality
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - name: Free disk space
+        shell: powershell
+        run: .github\workflows\scripts\free-windows-disk.ps1
+      - name: Install current CUDA SDK and pinned DPC++ compiler
+        shell: cmd
+        run: scripts\install-dev.bat -Component base,node,cuda,dpcpp -Jobs 2
+      - name: Compile a CUDA SYCL kernel with the current SDK
+        shell: powershell
+        run: scripts\probe-cuda-sdk.ps1
+
   warm-windows-acpp-cuda:
     name: Windows toolchain / acpp-cuda
     needs:
+      - cuda-sdk-probe
       - source-quality
       - windows-script-quality
     runs-on: windows-2022
@@ -112,7 +130,7 @@ jobs:
           path: C:/Tools/acpp-cuda
           # The source builder pins every input that affects this output. Do not invalidate a
           # multi-hour LLVM cache for unrelated installer orchestration edits.
-          key: windows-acpp-cuda-source-v1-${{ hashFiles('scripts/build-windows-adaptivecpp-base.ps1', 'scripts/windows-install-helpers.ps1', 'scripts/import-vcvars.ps1') }}
+          key: windows-acpp-cuda-13.4.2-v1-${{ hashFiles('scripts/build-windows-adaptivecpp-base.ps1', 'scripts/windows-install-helpers.ps1', 'scripts/import-vcvars.ps1', 'scripts/install-cuda-13.4.2.ps1', 'scripts/cuda-13.4.2-windows.json') }}
 
       - name: Build uncached AdaptiveCpp CUDA/base toolchain
         if: steps.acpp-cuda-cache.outputs.cache-hit != 'true'
@@ -146,7 +164,7 @@ jobs:
         uses: actions/cache/restore@v6
         with:
           path: C:/Tools/acpp-cuda
-          key: windows-acpp-cuda-source-v1-${{ hashFiles('scripts/build-windows-adaptivecpp-base.ps1', 'scripts/windows-install-helpers.ps1', 'scripts/import-vcvars.ps1') }}
+          key: windows-acpp-cuda-13.4.2-v1-${{ hashFiles('scripts/build-windows-adaptivecpp-base.ps1', 'scripts/windows-install-helpers.ps1', 'scripts/import-vcvars.ps1', 'scripts/install-cuda-13.4.2.ps1', 'scripts/cuda-13.4.2-windows.json') }}
           fail-on-cache-miss: true
 
       - name: Cache AdaptiveCpp HIP toolchain
@@ -160,7 +178,7 @@ jobs:
           path: |
             C:/Tools/acpp-amd/bin/hipSYCL/rt-backend-hip.dll
             C:/Tools/acpp-amd/lib/hipSYCL/bitcode/libkernel-sscp-amdgpu-amdhsa-full.bc
-          key: windows-acpp-hip-overlay-v1-${{ hashFiles('scripts/install-dev.ps1', 'scripts/build-windows-adaptivecpp-base.ps1', 'scripts/build-windows-adaptivecpp-amd.ps1', 'scripts/windows-install-helpers.ps1', 'scripts/import-vcvars.ps1') }}
+          key: windows-acpp-hip-cuda13.4.2-v1-${{ hashFiles('scripts/install-dev.ps1', 'scripts/build-windows-adaptivecpp-base.ps1', 'scripts/build-windows-adaptivecpp-amd.ps1', 'scripts/windows-install-helpers.ps1', 'scripts/import-vcvars.ps1') }}
 
       - name: Rehydrate cached AdaptiveCpp HIP toolchain
         if: steps.acpp-hip-cache.outputs.cache-hit == 'true'
@@ -231,7 +249,7 @@ jobs:
         uses: actions/cache/restore@v6
         with:
           path: C:/Tools/acpp-cuda
-          key: windows-acpp-cuda-source-v1-${{ hashFiles('scripts/build-windows-adaptivecpp-base.ps1', 'scripts/windows-install-helpers.ps1', 'scripts/import-vcvars.ps1') }}
+          key: windows-acpp-cuda-13.4.2-v1-${{ hashFiles('scripts/build-windows-adaptivecpp-base.ps1', 'scripts/windows-install-helpers.ps1', 'scripts/import-vcvars.ps1', 'scripts/install-cuda-13.4.2.ps1', 'scripts/cuda-13.4.2-windows.json') }}
           fail-on-cache-miss: true
 
       - name: Restore staged AdaptiveCpp HIP toolchain
@@ -240,7 +258,7 @@ jobs:
           path: |
             C:/Tools/acpp-amd/bin/hipSYCL/rt-backend-hip.dll
             C:/Tools/acpp-amd/lib/hipSYCL/bitcode/libkernel-sscp-amdgpu-amdhsa-full.bc
-          key: windows-acpp-hip-overlay-v1-${{ hashFiles('scripts/install-dev.ps1', 'scripts/build-windows-adaptivecpp-base.ps1', 'scripts/build-windows-adaptivecpp-amd.ps1', 'scripts/windows-install-helpers.ps1', 'scripts/import-vcvars.ps1') }}
+          key: windows-acpp-hip-cuda13.4.2-v1-${{ hashFiles('scripts/install-dev.ps1', 'scripts/build-windows-adaptivecpp-base.ps1', 'scripts/build-windows-adaptivecpp-amd.ps1', 'scripts/windows-install-helpers.ps1', 'scripts/import-vcvars.ps1') }}
           fail-on-cache-miss: true
 
       - name: Rehydrate staged AdaptiveCpp HIP toolchain
@@ -297,13 +315,13 @@ jobs:
         shell: powershell
         run: |
           $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
-          Rename-Item "mom-v$version-win.zip" "mom-v$version-win-x86-64-v3.zip"
+          Rename-Item "mom-v$version-win.zip" "mom-v$version-win-x86-64-v3-cuda13.4.2.zip"
 
       - name: Upload Windows release artifact
         uses: actions/upload-artifact@v7
         with:
-          name: mom-win-x86-64-v3
-          path: mom-*-win-x86-64-v3.zip
+          name: mom-win-x86-64-v3-cuda13.4.2
+          path: mom-*-win-x86-64-v3-cuda13.4.2.zip
           if-no-files-found: error
           overwrite: true
           compression-level: 0

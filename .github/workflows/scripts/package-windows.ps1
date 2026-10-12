@@ -102,7 +102,7 @@ setlocal
 set "MOM_DIR=%~dp0"
 set "MOM_LIBS=%MOM_DIR%libs"
 set "PATH=%MOM_LIBS%;%MOM_DIR%;%CD%;%PATH%"
-if not defined CUDA_PATH if exist "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin\ptxas.exe" set "CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6"
+if not defined CUDA_PATH if exist "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.4\bin\ptxas.exe" set "CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.4"
 if defined CUDA_PATH if exist "%CUDA_PATH%\bin" set "PATH=%CUDA_PATH%\bin;%PATH%"
 if not defined VSCMD_VER if exist "C:\BuildTools\Common7\Tools\VsDevCmd.bat" call "C:\BuildTools\Common7\Tools\VsDevCmd.bat" -arch=amd64 -host_arch=amd64 >nul
 if not defined VSCMD_VER if exist "%ProgramFiles(x86)%\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat" call "%ProgramFiles(x86)%\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat" -arch=amd64 -host_arch=amd64 >nul
@@ -171,7 +171,7 @@ Copy-Item "$multiCompilerDir/*" $libsDir -Recurse -Force
 # packaging; new builds already snapshot libdevice in this relocatable, upstream-defined path.
 $acppCudaLibdevice = Join-Path $libsDir 'acpp-cuda\hipSYCL\ext\bitcode\ptx\libdevice.10.bc'
 if (-not (Test-Path $acppCudaLibdevice)) {
-  $cudaRoots = @($env:CUDA_PATH, 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6') |
+  $cudaRoots = @($env:CUDA_PATH, 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.4') |
     Where-Object { $_ }
   $libdevice = Get-ChildItem -Path ($cudaRoots | ForEach-Object {
     Join-Path $_ 'nvvm\libdevice\libdevice.10.bc'
@@ -309,6 +309,14 @@ foreach ($runtime in @(
 )) {
   if (-not (Test-Path (Join-Path $libsDir $runtime))) {
     throw "Windows release worker is missing required Unified Runtime file: $runtime"
+  }
+}
+# Dynamic NVRTC loads are invisible to dumpbin; ship the exact CUDA 13.4 compiler cohort.
+foreach ($worker in @('dpcpp', 'acpp-cuda')) {
+  foreach ($name in @('nvrtc64_130_0.dll', 'nvrtc-builtins64_134.dll')) {
+    $source = Join-Path $env:CUDA_PATH "bin\$name"
+    if (-not (Test-Path $source -PathType Leaf)) { throw "Missing CUDA 13.4 runtime: $source" }
+    Copy-Item $source (Join-Path $libsDir "$worker\$name") -Force
   }
 }
 # Ship the KawPow source-JIT assets beside the DPC++ worker when present.

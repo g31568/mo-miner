@@ -5,7 +5,7 @@ param(
   [string]$AcppCudaDir = 'C:\Tools\acpp-cuda',
   [string]$AcppHipDir = 'C:\Tools\acpp-amd',
   [string]$HipDir = 'C:\Program Files\AMD\ROCm\7.1',
-  [string]$CudaDir = 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6',
+  [string]$CudaDir = 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.4',
   [string]$DpcppSha256 = '8e5e9de06ed46c5e28aac4c574811a68f0a85dbb1cb65508187b0b8cf2e573cb',
   [string]$Workspace = 'C:\mom-dev-bootstrap',
   [switch]$ValidateOnly,
@@ -76,9 +76,8 @@ $sevenZipSha256 = 'ec6af1ea0367d16dde6639a89a080a524cebc4d4bedfe00ed0cac4b865a91
 $adaptiveCppCommit = 'da2463e45aa90aa36306c45abcfc05b87de51bc6'
 $hipSdkUrl = 'https://download.amd.com/developer/eula/rocm-hub/AMD-Software-PRO-Edition-26.Q1-Win11-For-HIP.exe'
 $hipSdkSha256 = 'f9e1fd7ae6004ce448ef39dcac2c3b45fed741f2d83210259bfda61b86f78f84'
-$cudaUrl = 'https://developer.download.nvidia.com/compute/cuda/12.6.0/network_installers/cuda_12.6.0_windows_network.exe'
-$cudaNvrtcUrl = 'https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvrtc/windows-x86_64/cuda_nvrtc-windows-x86_64-13.1.115-archive.zip'
-$cudaNvrtcSha256 = '4ddd5a1e34fd62bb41e78c0725edfbf5609f4ecedd7fe118eddf2148b097fc91'
+$cudaNvrtcUrl = 'https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvrtc/windows-x86_64/cuda_nvrtc-windows-x86_64-13.4.92-archive.zip'
+$cudaNvrtcSha256 = '92e4db6e79550665e1dbdc6cc09c934452a667881f5ed49a51681429874a8f0d'
 $oneApiUrl = 'https://registrationcenter-download.intel.com/akdlm/IRC_NAS/bae85ab1-cfcd-4251-8d42-a0c27949ea33/intel-oneapi-toolkit-2026.0.0.193.exe'
 $oneApiPackage = 'intel-oneapi-toolkit'
 $oneApiComponents = 'intel.oneapi.win.cpp-dpcpp-common'
@@ -351,18 +350,18 @@ function Install-OneApi {
 }
 function Test-CudaNvrtc {
   (Test-Path (Join-Path $CudaDir 'bin\nvrtc64_130_0.dll')) -and
-    (Test-Path (Join-Path $CudaDir 'bin\nvrtc-builtins64_131.dll'))
+    (Test-Path (Join-Path $CudaDir 'bin\nvrtc-builtins64_134.dll'))
 }
 function Install-CudaNvrtc {
   if (Test-CudaNvrtc) { return }
   Require-Administrator
-  $archive = Join-Path $Workspace 'cuda-nvrtc-13.1.115.zip'
+  $archive = Join-Path $Workspace 'cuda-nvrtc-13.4.92.zip'
   Download $cudaNvrtcUrl $archive
   Assert-Sha256 $archive $cudaNvrtcSha256
   Add-Type -AssemblyName System.IO.Compression.FileSystem
   $zip = [System.IO.Compression.ZipFile]::OpenRead($archive)
   try {
-    foreach ($name in @('nvrtc64_130_0.dll','nvrtc-builtins64_131.dll')) {
+    foreach ($name in @('nvrtc64_130_0.dll','nvrtc-builtins64_134.dll')) {
       $entry = $zip.Entries | Where-Object { $_.Name -eq $name } | Select-Object -First 1
       if (-not $entry) { throw "CUDA NVRTC archive does not contain $name" }
       [System.IO.Compression.ZipFileExtensions]::ExtractToFile(
@@ -374,15 +373,10 @@ function Install-CudaNvrtc {
   if (-not (Test-CudaNvrtc)) { throw 'CUDA 13 NVRTC runtime install failed validation' }
 }
 function Install-Cuda {
+  # Assemble the latest pinned SDK without installing a display driver.
   if (-not (Test-MomCudaCompilerSdk $CudaDir)) {
     Require-Administrator
-    $installer = Join-Path $Workspace 'cuda-network.exe'
-    Download $cudaUrl $installer
-    Assert-Authenticode $installer
-    $process = Start-Process $installer -ArgumentList @(
-      '-s','nvcc_12.6','cudart_12.6','nvrtc_12.6','nvrtc_dev_12.6','nvml_dev_12.6'
-    ) -Wait -PassThru
-    if ($process.ExitCode -notin @(0,3010)) { throw "CUDA toolkit install failed: $($process.ExitCode)" }
+    & (Join-Path $repo 'scripts\install-cuda-13.4.2.ps1') -CudaDir $CudaDir -Workspace $Workspace
   }
   Install-CudaNvrtc
   if (-not (Test-MomCccl $CudaDir)) { Require-Administrator; Install-MomCccl $CudaDir }

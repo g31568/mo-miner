@@ -118,7 +118,7 @@ if ($actualLlvm -ne $llvmCommit) {
 }
 
 $cuda = if ($env:CUDA_PATH) { $env:CUDA_PATH } else {
-  'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6'
+  'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.4'
 }
 $subprojectJobs = [Math]::Min(4, $Jobs)
 $cmakeArgs = @(
