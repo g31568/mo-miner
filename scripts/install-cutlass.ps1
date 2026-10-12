@@ -1,9 +1,10 @@
 $MomCutlassVersion = "v4.6.1"
 $MomCutlassSha256 = "455d9ba37d57cb214d67b5d1a6070441244b378bcacb2e916c3b86f2a9b02e1c"
 $MomCutlassUrl = "https://github.com/NVIDIA/cutlass/archive/refs/tags/$MomCutlassVersion.tar.gz"
-$MomCcclVersion = "12.6.37"
-$MomCcclSha256 = "4fe0460b101887a62fd8ceb1e518926439148c23ec95ef41b694c583031392e9"
-$MomCcclUrl = "https://developer.download.nvidia.com/compute/cuda/redist/cuda_cccl/windows-x86_64/cuda_cccl-windows-x86_64-$MomCcclVersion-archive.zip"
+# Match the CCCL component distributed with CUDA Toolkit 13.4.2.
+$MomCcclVersion = "13.3.4.3.1"
+$MomCcclSha256 = "17d0ca1592c0dfc974a5fc39f470a6b7bae40da239e3e19bd0752017735acbca"
+$MomCcclUrl = "https://developer.download.nvidia.com/compute/cuda/redist/cccl/windows-x86_64/cccl-windows-x86_64-$MomCcclVersion-archive.zip"
 
 function Assert-MomNoReparseAncestor {
   param(
