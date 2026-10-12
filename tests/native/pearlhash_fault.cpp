@@ -70,7 +70,7 @@ struct vendor_id {};
 namespace event {
 struct command_execution_status {};
 }
-enum class event_command_status {complete};
+enum class event_command_status {submitted, running, complete};
 }
 struct device {
   backend selected;
@@ -233,6 +233,7 @@ struct State {
   sycl::queue prep_queue;
   double wait_ema_us = 0.0;
   bool cuda_tensor = false;
+  bool cuda_f16 = false;
   uint8_t key[32]{};
   uint8_t header[76]{};
   bool have_header = false;

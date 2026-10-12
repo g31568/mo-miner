@@ -194,7 +194,8 @@ if (!h.cluster_process()) {
     // Intel and AMD CryptoNight-GPU workers need two complete windows to reach their steady rate on
     // both operating systems. Exclude those cold windows from profitability and tuning decisions.
     const gpuVendor = compilerPolicy.gpuFromEnv(process.env);
-    const warmupSamples = algo === "cn/gpu" && (gpuVendor === "intel" || gpuVendor === "amd") ? 2 : 0;
+    const warmupSamples = algo === "cn/gpu" &&
+      ["intel", "intel_igpu", "amd"].includes(gpuVendor) ? 2 : 0;
     /** @type {number[]} */
     const rates = [];
     /** @param {number} hashrate */
@@ -216,10 +217,14 @@ if (!h.cluster_process()) {
     // Verthash may generate its dataset on the first dispatch. Native timing discards that dispatch,
     // so generation cannot dilute the reported rate; only give the one-time setup room to finish.
     const setupTimeout = algo === "verthash" ? 30*60*1000 : 0;
+    // Large Pearl profiles need two long dispatches before the first timed rate, then one per sample.
+    const firstSampleMinutes = algo === "pearlhash" ? 6 : 4;
+    const additionalSampleMinutes = algo === "pearlhash" ? 3 : 2;
     const timeout = setTimeout(function() {
       h.log_err("Benchmark " + algo + " algo (" + job.dev + ") timeout");
       return finish(0);
-    }, setupTimeout + (4 + Math.max(0, samples + warmupSamples - 1) * 2)*60*1000);
+    }, setupTimeout + (firstSampleMinutes +
+      Math.max(0, samples + warmupSamples - 1) * additionalSampleMinutes)*60*1000);
     algo_params_bench_cb = record;
     set_algo_msr(algo);
     h.messageWorkers({type: "bench", job: last_job = job});
@@ -451,11 +456,17 @@ if (!h.cluster_process()) {
   });
   const {
     detect_cpu, use_msr_tuning, add_algo_params, publicAlgoParams,
-    prepare_fixed_algo_params, donationAlgoSupported,
+    prepare_algo_params, donationAlgoSupported,
   } = environment;
 
   function start_after_algo_params() {
-    prepare_fixed_algo_params();
+    try {
+      if (!prepare_algo_params()) {
+        return err_exit("No supported algorithms for the selected mining devices");
+      }
+    } catch (error) {
+      return err_exit(errorMessage(error));
+    }
     if (global.opt.bench_algo_params !== 0) {return bench_algos(start_mining);}
     return start_mining();
   }

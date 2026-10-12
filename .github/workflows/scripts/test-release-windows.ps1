@@ -11,6 +11,10 @@ if ($Suite -notin @("all", "cpu", "gpu", "gpu-discrete", "gpu-integrated", "gpu-
   throw "Unknown release test suite: $Suite"
 }
 $env:MOM_SKIP_MSR = "1"
+if ($Suite -eq 'gpu-integrated') {
+  $env:MOM_GPU_BACKEND = 'intel_igpu'
+  $env:ONEAPI_DEVICE_SELECTOR = 'level_zero:gpu'
+}
 if ($Suite -eq 'gpu-portable-cpu') {
   # The missing-ICD path must fail closed before it can emit a successful SKIP.
   $env:MOM_REQUIRE_PORTABLE_CPU_TESTS = '1'
@@ -40,8 +44,11 @@ if ($workLeaf -notmatch '^mom-release-[A-Za-z0-9_.-]+$') {
 }
 Assert-NoReparseAncestor $workDir 'Release test workspace'
 $workspaceMarker = Join-Path $workDir '.mom-release-test-workspace'
-$packageVersion = (Get-Content -LiteralPath (Join-Path $repoRoot 'package.json') -Raw |
-  ConvertFrom-Json).version
+$packageVersion = if ($env:MOM_RELEASE_VERSION) {
+  $env:MOM_RELEASE_VERSION -replace '^[vV]', ''
+} else {
+  (Get-Content -LiteralPath (Join-Path $repoRoot 'package.json') -Raw | ConvertFrom-Json).version
+}
 if ([string]::IsNullOrWhiteSpace([string]$packageVersion) -or
     [string]$packageVersion -notmatch '^[0-9][0-9A-Za-z.-]*$') {
   throw "Invalid package version: $packageVersion"
@@ -336,6 +343,7 @@ $defaultWorker = if ($Suite -eq 'gpu-portable-cpu') { 'dpcpp-opencl' } else { sw
   'nvidia' { 'dpcpp' }
   'amd' { 'acpp-hip' }
   'opencl' { 'dpcpp-opencl' }
+  'intel_igpu' { 'dpcpp-opencl' }
   default { 'oneapi' }
 } }
 $env:MOM_NATIVE_PATH = Join-Path $libsDir "$defaultWorker\mom.node"

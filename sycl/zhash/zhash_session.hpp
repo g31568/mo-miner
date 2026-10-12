@@ -65,6 +65,7 @@ public:
   static constexpr unsigned fast_candidate_roots =
       Layout::max_candidate_roots < 256 ? Layout::max_candidate_roots : 256;
 
+  // Create an independent ordered queue and allocate only a device-supported arena plan.
   explicit Session(const sycl::queue& source, const SessionOptions& options = {})
       : queue_(make_queue(source, options.collect_stage_times)),
         options_(options), lifecycle_(Layout::slot_count) {
@@ -75,6 +76,7 @@ public:
     allocate();
   }
 
+  // Drain live submissions before freeing their storage; destructor errors remain contained.
   ~Session() {
     try {
       queue_.wait_and_throw();
@@ -92,6 +94,11 @@ public:
   SessionStatus status() const { return lifecycle_.status(); }
   const std::string& last_error() const { return last_error_; }
 
+#ifdef MOM_SYCL_ADAPTIVECPP_CUDA
+  // Change scheduling only between completed runs; both paths share the same bounded arenas.
+  void set_cuda_partition(const bool enabled) { cuda_partition_ = enabled; }
+#endif
+
   // Discards all counters and starts a clean attempt.  It is safe to call after an overflow or a
   // rejected root; a different capacity requires a different Session<Layout> instantiation.
   void reset() {
@@ -101,6 +108,7 @@ public:
     last_error_.clear();
   }
 
+  // Run a complete header attempt with overflow accounting, then recover and independently verify bounded roots.
   RunReport run(const std::uint8_t (&header)[Spec::header_length]) {
     RunReport report;
     report.device_bytes = Layout::device_bytes;
@@ -236,6 +244,7 @@ public:
   }
 
 private:
+  // Preserve the source device/context while enforcing ordered dependencies and optional profiling.
   static sycl::queue make_queue(const sycl::queue& source, const bool profile) {
     if (profile)
       return sycl::queue(source.get_context(), source.get_device(),
@@ -249,6 +258,9 @@ private:
   SessionOptions options_;
   ZHashSessionLifecycle lifecycle_;
   std::string last_error_;
+#ifdef MOM_SYCL_ADAPTIVECPP_CUDA
+  bool cuda_partition_ = false;
+#endif
 
   std::uint8_t* device_header_ = nullptr;
   std::uint64_t* device_midstate_ = nullptr;
@@ -292,6 +304,7 @@ private:
     return result;
   }
 
+  // Validate memory, allocation, launch, and counter-width limits before allocating persistent arenas.
   void allocate() {
     const sycl::device device = queue_.get_device();
     if (!mom_has_usm_device(device))
@@ -357,6 +370,7 @@ private:
   }
 
   template <typename T>
+  // Clear one owned pointer after nonthrowing release, including partial-construction cleanup.
   void free_ptr(T*& pointer) noexcept {
     if (pointer != nullptr) {
       try {
@@ -367,6 +381,7 @@ private:
     }
   }
 
+  // Release owned buffers and invalidate all aliases into their shared counter/header storage.
   void free_all() noexcept {
     free_ptr(input_storage_);
     device_header_ = nullptr;
@@ -389,6 +404,7 @@ private:
     free_ptr(verified_fields_);
   }
 
+  // Reset attempt counters in queue order; retained arena records are bounded by the new counts.
   void clear_device_state() {
     if (options_.collect_round_counts) {
       queue_.fill(flat_counts_, 0u, 5);
@@ -396,18 +412,25 @@ private:
     queue_.fill(counts_storage_, 0u, bucket_count_size + 6u);
   }
 
+  // Select the backend's first collision launch while preserving split-head output and overflow reporting.
   sycl::event submit_first_round() {
+#if defined(MOM_SYCL_HAS_HIP) || defined(MOM_SYCL_ADAPTIVECPP_CUDA)
 #ifdef MOM_SYCL_HAS_HIP
     if (cache_partition_inputs_)
       return mom_equihash::submit_bucket_round_bucketed_partitioned<
           Spec, InitialLayout, InitialLayout, Round1Record, 8, true>(
           queue_, level0_heads_, level0_tails_, bucket_counts_[0], round1_heads_, round1_tails_,
           bucket_counts_[1], overflow_counts_ + 1);
+#else
+    // CUDA measures both schedules; HIP's cached variant can exceed CUDA's 48 KiB budget.
+    if (cuda_partition_)
+#endif
     return mom_equihash::submit_bucket_round_bucketed_partitioned<
         Spec, InitialLayout, InitialLayout, Round1Record, 8>(
         queue_, level0_heads_, level0_tails_, bucket_counts_[0], round1_heads_, round1_tails_,
         bucket_counts_[1], overflow_counts_ + 1);
-#else
+#endif
+#ifndef MOM_SYCL_HAS_HIP
     return mom_equihash::submit_bucket_round_bucketed<Spec, InitialLayout, InitialLayout,
                                                        Round1Record>(
         queue_, level0_heads_, level0_tails_, bucket_counts_[0], round1_heads_, round1_tails_,
@@ -415,18 +438,24 @@ private:
 #endif
   }
 
+  // Transition split first-round records into the later arena using supported partition/cache settings.
   sycl::event submit_second_round() {
+#if defined(MOM_SYCL_HAS_HIP) || defined(MOM_SYCL_ADAPTIVECPP_CUDA)
 #ifdef MOM_SYCL_HAS_HIP
     if (cache_partition_inputs_)
       return mom_equihash::submit_split_collision_round_bucketed_partitioned<
           Spec, 5, InitialLayout::local_bits, InitialLayout, LaterLayout, Round1Record,
           Round2Record, 4, true>(queue_, round1_heads_, round1_tails_, bucket_counts_[1], round2_,
                                 bucket_counts_[2], overflow_counts_ + 2);
+#else
+    if (cuda_partition_)
+#endif
     return mom_equihash::submit_split_collision_round_bucketed_partitioned<
         Spec, 5, InitialLayout::local_bits, InitialLayout, LaterLayout, Round1Record,
         Round2Record, 4>(queue_, round1_heads_, round1_tails_, bucket_counts_[1], round2_,
                          bucket_counts_[2], overflow_counts_ + 2);
-#else
+#endif
+#ifndef MOM_SYCL_HAS_HIP
     return mom_equihash::submit_split_collision_round_bucketed<
         Spec, 5, InitialLayout::local_bits, InitialLayout, LaterLayout, Round1Record,
         Round2Record>(queue_, round1_heads_, round1_tails_, bucket_counts_[1], round2_,
@@ -434,36 +463,49 @@ private:
 #endif
   }
 
+  // Dispatch the next bounded collision stage with partitioning only where configured.
   sycl::event submit_third_round() {
+#if defined(MOM_SYCL_HAS_HIP) || defined(MOM_SYCL_ADAPTIVECPP_CUDA)
 #ifdef MOM_SYCL_HAS_HIP
     if (cache_partition_inputs_)
       return mom_equihash::submit_collision_round_bucketed_partitioned<
           Spec, 4, LaterLayout, LaterLayout, Round2Record, Round3Record, 4, true>(
           queue_, round2_, bucket_counts_[2], round3_, bucket_counts_[3], overflow_counts_ + 3);
+#else
+    if (cuda_partition_)
+#endif
     return mom_equihash::submit_collision_round_bucketed_partitioned<
         Spec, 4, LaterLayout, LaterLayout, Round2Record, Round3Record, 4>(
         queue_, round2_, bucket_counts_[2], round3_, bucket_counts_[3], overflow_counts_ + 3);
-#else
+#endif
+#ifndef MOM_SYCL_HAS_HIP
     return mom_equihash::submit_collision_round_bucketed<Spec, 4, LaterLayout, LaterLayout>(
         queue_, round2_, bucket_counts_[2], round3_, bucket_counts_[3], overflow_counts_ + 3);
 #endif
   }
 
+  // Dispatch the final materialized collision stage, retaining parents for zero-root recovery.
   sycl::event submit_fourth_round() {
+#if defined(MOM_SYCL_HAS_HIP) || defined(MOM_SYCL_ADAPTIVECPP_CUDA)
 #ifdef MOM_SYCL_HAS_HIP
     if (cache_partition_inputs_)
       return mom_equihash::submit_collision_round_bucketed_partitioned<
           Spec, 3, LaterLayout, LaterLayout, Round3Record, Round4Record, 4, true>(
           queue_, round3_, bucket_counts_[3], round4_, bucket_counts_[4], overflow_counts_ + 4);
+#else
+    if (cuda_partition_)
+#endif
     return mom_equihash::submit_collision_round_bucketed_partitioned<
         Spec, 3, LaterLayout, LaterLayout, Round3Record, Round4Record, 4>(
         queue_, round3_, bucket_counts_[3], round4_, bucket_counts_[4], overflow_counts_ + 4);
-#else
+#endif
+#ifndef MOM_SYCL_HAS_HIP
     return mom_equihash::submit_collision_round_bucketed<Spec, 3, LaterLayout, LaterLayout>(
         queue_, round3_, bucket_counts_[3], round4_, bucket_counts_[4], overflow_counts_ + 4);
 #endif
   }
 
+  // Publish truncation as an incomplete attempt instead of returning potentially missing solutions.
   RunReport& capacity_report(RunReport& report, const char* const message) {
     report.status = SessionStatus::capacity_overflow;
     report.error = message;
@@ -471,6 +513,7 @@ private:
     return report;
   }
 
+  // Mark runtime failure terminal for this attempt and retain its diagnostic for the caller.
   RunReport& device_error_report(RunReport& report, const char* const message) {
     lifecycle_.device_error();
     report.status = SessionStatus::device_error;
@@ -479,6 +522,7 @@ private:
     return report;
   }
 
+  // Encode verified leaves and deduplicate canonical proofs; invalid roots contribute only rejection counts.
   void recover_roots(RunReport& report, const std::uint32_t* leaves,
                      const std::uint8_t* valid) {
     for (std::size_t candidate = 0; candidate < report.zero_root_count; ++candidate) {

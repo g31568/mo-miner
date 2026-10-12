@@ -1,0 +1,299 @@
+#!/usr/bin/env bash
+set -e
+
+SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )/.." &> /dev/null && pwd )
+
+backend_was_explicit=0
+[ -z "${MOM_GPU_BACKEND+x}" ] || backend_was_explicit=1
+backend=${MOM_GPU_BACKEND:-intel}
+case "${backend,,}" in intel|intel_igpu) backend=${backend,,} ;; esac
+case "$backend" in intel|intel_igpu|nvidia|amd|opencl|all) ;; *) echo "Unknown MOM_GPU_BACKEND: $backend" >&2; exit 2 ;; esac
+image=mom-build-multicompiler
+name="mom-$backend"
+reuse_built_worker=${MOM_REUSE_BUILT_WORKER:-0}
+container_stdin=${MOM_CONTAINER_STDIN:-0}
+sycl_cache_volume=${MOM_SYCL_CACHE_VOLUME:-mom-sycl-cache-$backend}
+
+case "$reuse_built_worker" in 0|1) ;; *) echo "MOM_REUSE_BUILT_WORKER must be 0 or 1" >&2; exit 2 ;; esac
+case "$container_stdin" in 0|1) ;; *) echo "MOM_CONTAINER_STDIN must be 0 or 1" >&2; exit 2 ;; esac
+if [[ ! $sycl_cache_volume =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; then
+  echo "MOM_SYCL_CACHE_VOLUME must be a valid Docker volume name" >&2
+  exit 2
+fi
+
+# Ordinary runs own the mutable build tree exclusively. Explicit reuse runs take a shared lock,
+# and skip every build mutation in the container. GPU occupancy and ownership must be coordinated
+# from fresh device evidence by the caller; no advisory GPU lock is used.
+lock_dir=$(git -C "$SCRIPT_DIR" rev-parse --path-format=absolute --git-path mom-locks)
+mkdir -p -m 700 "$lock_dir"
+build_lock="$lock_dir/mom-r-sh-${UID}.build.lock"
+exec 9>"$build_lock"
+if [ "$reuse_built_worker" = 1 ]; then
+  flock -s 9
+else
+  flock 9
+fi
+
+if ! docker buildx version >/dev/null 2>&1; then
+  echo "Docker buildx is required. Install docker-buildx-plugin or see README.md." >&2
+  exit 1
+fi
+
+# BuildKit component stages are cached; only the final multicompiler image is run. CI points
+# MOM_BUILDX_CACHE_DIR at an actions/cache directory. Use independent scopes so an updated compiler
+# does not invalidate the others, and replace an imported cache only after its image built cleanly.
+build_image() {
+  local tag=$1 dockerfile=$2 scope=$3
+  local -a cache_args=() build_args=() builder_args=()
+  local cache_root=${MOM_BUILDX_CACHE_DIR:-}
+  local enabled_scopes=",${MOM_BUILDX_CACHE_SCOPES:-combined,acpp-cuda,acpp-hip,multicompiler},"
+  if [ -n "$cache_root" ] && [[ "$enabled_scopes" == *",$scope,"* ]]; then
+    local source_cache="$cache_root/$scope" next_cache="$cache_root/.next-$scope"
+    mkdir -p "$cache_root"
+    rm -rf "$next_cache"
+    [ ! -f "$source_cache/index.json" ] || cache_args+=(--cache-from "type=local,src=$source_cache")
+    if [ "${MOM_BUILDX_CACHE_READ_ONLY:-0}" != 1 ]; then
+      # The payload-only component images are sufficient to skip an unchanged compiler rebuild.
+      # Caching every LLVM object or duplicate CUDA/ROCm SDK (mode=max) would exceed GitHub's cache
+      # quota before both source toolchains fit.
+      cache_args+=(--cache-to "type=local,dest=$next_cache,mode=min")
+    fi
+  fi
+  case "$scope" in
+    acpp-cuda|acpp-hip)
+      [ -z "${MOM_BUILD_JOBS:-}" ] || build_args+=(--build-arg "MOM_BUILD_JOBS=$MOM_BUILD_JOBS")
+      ;;
+  esac
+  # CI's setup-buildx action selects a docker-container builder. That is useful while importing the
+  # source-toolchain caches, but building and --load'ing the 25+ GiB combined/final images there
+  # stores their layers once inside BuildKit and again in Docker. Use Docker's default BuildKit
+  # store for the uncached final stages after the source images have been materialized.
+  if [ "${MOM_BUILDX_CACHE_READ_ONLY:-0}" = 1 ] && [ "${MOM_BUILDX_CACHE_DELETE_AFTER_LOAD:-0}" = 1 ]; then
+    case "$scope" in combined|multicompiler) builder_args+=(--builder default) ;; esac
+  fi
+  docker buildx build "${builder_args[@]}" --load --progress=none -t "$tag" --pull=false \
+    "${cache_args[@]}" "${build_args[@]}" -f "$SCRIPT_DIR/$dockerfile" "$SCRIPT_DIR"
+  if [ -n "${next_cache:-}" ] && [ -f "$next_cache/index.json" ]; then
+    rm -rf "$source_cache"
+    mv "$next_cache" "$source_cache"
+  fi
+  # Final CI assembly imports these caches only to materialize the component images. Once --load
+  # succeeds, the restored blob directory can be removed before the large unified image is built;
+  # the loaded Docker image is independent of that directory.
+  if [ "${MOM_BUILDX_CACHE_DELETE_AFTER_LOAD:-0}" = 1 ] && [ -n "${source_cache:-}" ]; then
+    rm -rf "$source_cache"
+  fi
+}
+
+case "${MOM_BUILD_ONLY_SCOPE:-}" in
+  acpp-cuda)
+    build_image mom-build-nvidia-adaptivecpp scripts/build-nvidia-adaptivecpp.dockerfile acpp-cuda
+    exit ;;
+  acpp-hip)
+    build_image mom-build-amd-acpp-baseline scripts/build-amd-adaptivecpp.dockerfile acpp-hip
+    exit ;;
+  '') ;;
+  *) echo "Unknown MOM_BUILD_ONLY_SCOPE: $MOM_BUILD_ONLY_SCOPE" >&2; exit 2 ;;
+esac
+
+# A normal source/test iteration uses the existing pinned development image and rebuilds only miner
+# objects through the bind mount. Reconfiguring LLVM merely because MOM_BUILD_JOBS or an unrelated
+# repository file changed wastes tens of minutes. CI component jobs still take the explicit
+# MOM_BUILD_ONLY_SCOPE path above; set MOM_REBUILD_DEV_IMAGE=1 after intentionally changing a
+# compiler/runtime Docker stage. Explicit worker reuse also keeps CI's loaded image after its
+# imported cache directories have been consumed; worker source admission remains in the entrypoint.
+if [ "${MOM_REBUILD_DEV_IMAGE:-0}" != 1 ] && \
+   { [ -z "${MOM_BUILDX_CACHE_DIR:-}" ] || [ "$reuse_built_worker" = 1 ]; } && \
+   docker image inspect "$image" >/dev/null 2>&1; then
+  # Older pinned compiler images may predate release packaging prerequisites. Probe without GPU,
+  # network or workspace access, then update only the small final stage if tools are missing.
+  if ! docker run --rm --network none --read-only --cap-drop ALL \
+      --security-opt no-new-privileges:true --cpus 1 --memory 128m --memory-swap 128m \
+      --pids-limit 32 --entrypoint /bin/bash "$image" \
+      -ec 'command -v patchelf >/dev/null && command -v readelf >/dev/null'; then
+    docker buildx build --builder default --load --progress=none -t "$image" --pull=false \
+      --target release-tools --build-arg "MOM_RELEASE_TOOLS_BASE=$image" \
+      -f "$SCRIPT_DIR/scripts/build-multicompiler.dockerfile" "$SCRIPT_DIR"
+  fi
+else
+  # Materialize the cached source toolchains first. In CI this also lets build_image remove each
+  # restored cache directory before the much larger oneAPI/CUDA combined image is downloaded.
+  build_image mom-build-nvidia-adaptivecpp scripts/build-nvidia-adaptivecpp.dockerfile acpp-cuda
+  build_image mom-build-amd-acpp-baseline scripts/build-amd-adaptivecpp.dockerfile acpp-hip
+  # The source images are now in Docker and no longer depend on the selected BuildKit worker. On
+  # hosted package jobs, discard its imported cache before assembling the two much larger images.
+  if [ "${MOM_BUILDX_CACHE_READ_ONLY:-0}" = 1 ] && [ "${MOM_BUILDX_CACHE_DELETE_AFTER_LOAD:-0}" = 1 ]; then
+    docker buildx prune --all --force >/dev/null
+  fi
+  build_image mom-build-combined scripts/build-combined.dockerfile combined
+  build_image "$image" scripts/build-multicompiler.dockerfile multicompiler
+fi
+if container_running=$(docker container inspect -f '{{.State.Running}}' "$name" 2>/dev/null); then
+  if [ "$container_running" = true ]; then
+    echo "Docker container '$name' is already running for backend '$backend'" >&2
+    exit 2
+  fi
+  docker rm "$name" >/dev/null
+fi
+
+host_cpus=$(nproc)
+container_cpus=${MOM_CONTAINER_CPUS:-$((host_cpus > 1 ? host_cpus - 1 : 1))}
+container_memory=${MOM_CONTAINER_MEMORY:-$(( $(awk '/MemTotal:/ {print $2}' /proc/meminfo) * 4 / 5 / 1024 ))m}
+container_pids=${MOM_CONTAINER_PIDS:-2048}
+container_network=${MOM_CONTAINER_NETWORK:-}
+if [ -z "$container_network" ]; then
+  [ "$reuse_built_worker" = 1 ] && container_network=none || container_network=bridge
+fi
+
+docker_flags=(
+  --cap-drop ALL
+  --cap-add CHOWN
+  --cap-add DAC_OVERRIDE
+  --cap-add FOWNER
+  --security-opt no-new-privileges:true
+  --cpus "$container_cpus"
+  --memory "$container_memory"
+  --memory-swap "$container_memory"
+  --pids-limit "$container_pids"
+  --network "$container_network"
+  --tmpfs /tmp:rw,nosuid,nodev,exec,size=8g
+  --rm
+  --name "$name"
+  --hostname "$name"
+  --env MOM_R_SH=1
+  --env "MOM_GPU_BACKEND=$backend"
+  --mount "type=bind,source=$SCRIPT_DIR,target=/root/mom"
+  # DPC++'s device binaries are keyed by image, driver, and device. Keep that cache across the
+  # disposable development containers so large OpenCL kernels are not recompiled on every run.
+  --env "SYCL_CACHE_PERSISTENT=${SYCL_CACHE_PERSISTENT:-1}"
+  --mount "type=volume,source=$sycl_cache_volume,target=/root/.cache/libsycl_cache"
+)
+if [ -n "${MOM_VERTHASH_DATA:-}" ]; then
+  verthash_data=$(realpath "$MOM_VERTHASH_DATA")
+  docker_flags+=(--env MOM_VERTHASH_DATA=/verthash.dat --mount "type=bind,source=$verthash_data,target=/verthash.dat,readonly")
+fi
+if [ -n "${MOM_GPU_TEST_VENDORS:-}" ]; then
+  docker_flags+=(--env "MOM_GPU_TEST_VENDORS=$MOM_GPU_TEST_VENDORS")
+elif [ "$backend_was_explicit" = 1 ]; then
+  # An explicitly selected backend narrows correctness tests; the default development container
+  # discovers and tests every supported discrete-GPU vendor visible on the host.
+  case "$backend" in
+    all) docker_flags+=(--env "MOM_GPU_TEST_VENDORS=intel,nvidia,amd") ;;
+    intel_igpu) docker_flags+=(--env "MOM_GPU_TEST_VENDORS=intel") ;;
+    opencl) ;; # OpenCL is a compiler/runtime backend, not a hardware vendor.
+    *) docker_flags+=(--env "MOM_GPU_TEST_VENDORS=$backend") ;;
+  esac
+fi
+
+# The NVIDIA nvptx images are AOT-built (no GPU needed to build); expose the GPU only when a host
+# driver is present so GPU runs/tests work (needs nvidia-container-toolkit). CI runners have none
+# and just build + package + run the CPU and SYCL-CPU suites. DRM backends receive only render nodes
+# for their selected vendor. The build picks its compiler in scripts/combined-build.sh.
+nvidia_gpu_available() {
+  nvidia-smi -L >/dev/null 2>&1 && return 0
+  command -v nvidia-container-cli >/dev/null 2>&1 || return 1
+  [ -e /dev/nvidiactl ] || return 1
+  find /sys/bus/pci/drivers/nvidia -maxdepth 1 -type l -name '0000:*' -print -quit 2>/dev/null | grep -q .
+}
+
+add_drm_vendor() {
+  local wanted_vendor=$1 render vendor node
+  for render in /sys/class/drm/renderD*; do
+    [ -r "$render/device/vendor" ] || continue
+    read -r vendor < "$render/device/vendor"
+    [ "$vendor" = "$wanted_vendor" ] || continue
+    node="/dev/dri/${render##*/}"
+    [ ! -c "$node" ] || docker_flags+=(--device "$node:$node")
+  done
+}
+
+docker_gpu_mode=${MOM_DOCKER_GPUS:-auto}
+if [ "$docker_gpu_mode" != 0 ]; then
+  case "$backend" in
+    intel|intel_igpu) add_drm_vendor 0x8086 ;;
+    amd) add_drm_vendor 0x1002; [ ! -c /dev/kfd ] || docker_flags+=(--device /dev/kfd:/dev/kfd) ;;
+    opencl|all)
+      add_drm_vendor 0x8086
+      add_drm_vendor 0x1002
+      [ ! -c /dev/kfd ] || docker_flags+=(--device /dev/kfd:/dev/kfd)
+      ;;
+  esac
+fi
+
+command_env_value() {
+  local name="$1"; shift
+  [ "${1:-}" = "env" ] || return 1
+  shift
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      --) continue ;;
+      "$name"=*)
+        printf '%s\n' "${arg#*=}"
+        return 0
+        ;;
+      *=*) ;;
+      *) return 1 ;;
+    esac
+  done
+  return 1
+}
+
+selector_requests_cuda() {
+  local selector="${ONEAPI_DEVICE_SELECTOR:-}"
+  selector="${selector:-$(command_env_value ONEAPI_DEVICE_SELECTOR "$@" || true)}"
+  case "$selector" in
+    *cuda*) return 0 ;;
+    *level_zero*|*opencl*) return 1 ;;
+    *) return 2 ;;
+  esac
+}
+
+case "$docker_gpu_mode" in
+  0) ;;
+  1|all) docker_flags+=(--gpus all) ;;
+  auto)
+    if [ "$backend" = opencl ]; then
+      # Generic OpenCL may still be provided by NVIDIA's driver. The container runtime mounts its
+      # ICD/user-space libraries only with --gpus; selected DRM nodes cover Intel and AMD.
+      nvidia_gpu_available && docker_flags+=(--gpus all)
+    elif [ "$backend" != amd ]; then
+      if selector_requests_cuda "$@"; then
+        nvidia_gpu_available && docker_flags+=(--gpus all)
+      elif [ $? -eq 2 ] && nvidia_gpu_available; then
+        docker_flags+=(--gpus all)
+      fi
+    fi
+    ;;
+  *)
+    docker_flags+=(--gpus "$docker_gpu_mode")
+    ;;
+esac
+
+# Forward remaining MoM controls plus the non-MoM runtime selectors. Backend and test-vendor values
+# were canonicalized above. The host dataset was bind-mounted as `/verthash.dat`; forwarding its host
+# value again would append a second environment entry and override that mapping.
+while IFS= read -r var; do
+  case "$var" in
+    MOM_GPU_BACKEND|MOM_GPU_TEST_VENDORS|MOM_VERTHASH_DATA|MOM_DOCKER_GPUS|MOM_CONTAINER_*)
+      continue ;;
+  esac
+  docker_flags+=(--env "$var")
+done < <(compgen -e | grep '^MOM_')
+for var in ONEAPI_DEVICE_SELECTOR ZE_AFFINITY_MASK UR_L0_ENABLE_RELAXED_ALLOCATION_LIMITS; do
+  if [ -n "${!var:-}" ]; then docker_flags+=(--env "$var"); fi
+done
+
+# Reuse runs omit stdin by default. Finite live checks may opt into plain stdin so `close` reaches
+# MoM without adding a pseudo-TTY or rebuilding the verified worker.
+if [ "$reuse_built_worker" != 1 ]; then
+  if [ -t 0 ] && [ -t 1 ]; then
+    docker_flags+=(-it)
+  else
+    docker_flags+=(-i)
+  fi
+elif [ "$container_stdin" = 1 ]; then
+  docker_flags+=(-i)
+fi
+
+docker run "${docker_flags[@]}" "$image" "$@"

@@ -56,6 +56,7 @@ public:
   // of failing an otherwise healthy device when a header narrowly exceeds the former 4096 limit.
   static constexpr std::uint32_t root_capacity = 8192;
 
+  // Create an ordered queue and allocate persistent storage after checking the device limits.
   explicit Session(const sycl::device& device)
       : queue_(make_queue(device, std::getenv("MOM_EQUIHASH192_7_PROFILE") != nullptr)),
         level_zero_(sycl_is_level_zero_gpu(device)) {
@@ -77,6 +78,7 @@ public:
   Session(const Session&) = delete;
   Session& operator=(const Session&) = delete;
 
+  // Choose a locally supported cached-input variant and return independently verified canonical proofs.
   std::vector<Solution> run(const std::uint8_t (&header)[Spec::header_length]) {
 #ifdef MOM_SYCL_HAS_HIP
     if (cache_partition_inputs_) return run_with_cache<true>(header);
@@ -86,11 +88,28 @@ public:
 
 private:
   template <bool CacheInput>
+  // Retry the same header after bounded arena overflow; explicit diagnostic layout overrides stay strict.
   std::vector<Solution> run_with_cache(const std::uint8_t (&header)[Spec::header_length]) {
     if (std::getenv("MOM_EQUIHASH192_7_HYBRID_ARENA"))
       return run_layout<HybridArena, CacheInput>(header);
     if (std::getenv("MOM_EQUIHASH192_7_RETRY_ARENA"))
       return run_layout<RetryArena, CacheInput>(header);
+#if defined(MOM_SYCL_ADAPTIVECPP_CUDA)
+    if constexpr (std::is_same_v<Arena, ProductionArena>) {
+      // Profiling and explicit geometry diagnostics retain their single-layout contract.
+      if (mom_is_cuda(queue_.get_device()) && !std::getenv("MOM_EQUIHASH192_7_PROFILE")) {
+        if (cuda_arena_ < 0)
+          return select_cuda_arena<CacheInput>(header);
+        if (cuda_arena_ == 1) {
+          try {
+            return run_layout<RetryArena, CacheInput>(header);
+          } catch (const BucketArenaOverflow&) {
+            return run_layout<Arena, CacheInput>(header);
+          }
+        }
+      }
+    }
+#endif
     if (level_zero_) {
       try {
         return run_layout<HybridArena, CacheInput>(header);
@@ -111,7 +130,48 @@ private:
     }
   }
 
+#if defined(MOM_SYCL_ADAPTIVECPP_CUDA)
+  // Different CUDA devices favor different bucket widths. Warm both existing layouts, then
+  // time A/B/B/A on one header without JIT bias or extra allocations. Compare every canonical
+  // proof before keeping a choice; only bucket overflow permits the other layout as a fallback.
+  template <bool CacheInput>
+  std::vector<Solution> select_cuda_arena(const std::uint8_t (&header)[Spec::header_length]) {
+    std::vector<Solution> reference;
+    double seconds[2]{};
+    unsigned active = 0;
+    try {
+      constexpr unsigned order[]{0, 1, 0, 1, 1, 0};
+      for (unsigned step = 0; step < 6; ++step) {
+        active = order[step];
+        const auto begin = std::chrono::steady_clock::now();
+        auto solutions = active ? run_layout<RetryArena, CacheInput>(header)
+                                : run_layout<Arena, CacheInput>(header);
+        const double elapsed =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count();
+        if (step == 0)
+          reference = solutions;
+        else if (!std::equal(reference.begin(), reference.end(), solutions.begin(), solutions.end(),
+                            [](const auto& a, const auto& b) { return a.encoded == b.encoded; }))
+          throw std::runtime_error("Equihash(192,7) CUDA arena proof mismatch");
+        if (step >= 2)
+          seconds[active] += elapsed;
+      }
+    } catch (const BucketArenaOverflow&) {
+      auto solutions = active ? run_layout<Arena, CacheInput>(header)
+                              : run_layout<RetryArena, CacheInput>(header);
+      cuda_arena_ = 1 - active;
+      return solutions;
+    }
+    // Retain the old layout across small timing differences; this is a per-device session choice.
+    cuda_arena_ = seconds[1] * 1.02 < seconds[0] ? 1 : 0;
+    std::fprintf(stderr, "equihash192_7: selected %u-bit buckets (12-bit %.2f, 13-bit %.2f I/s)\n",
+                 12u + cuda_arena_, 2.0 / seconds[0], 2.0 / seconds[1]);
+    return reference;
+  }
+#endif
+
   template <typename ActiveArena, bool CacheInput>
+  // Run all collision stages in compatible retained storage, then recover, verify, and deduplicate roots.
   std::vector<Solution> run_layout(const std::uint8_t (&header)[Spec::header_length]) {
     const auto started = std::chrono::steady_clock::now();
     const bool profile = std::getenv("MOM_EQUIHASH192_7_PROFILE") && profile_reports_ < 8;
@@ -328,6 +388,7 @@ private:
     return solutions;
   }
 
+  // Preserve in-order stage dependencies, adding timestamps only for requested profiling.
   static sycl::queue make_queue(const sycl::device& device, const bool profile) {
     if (profile)
       return sycl::queue(device, sycl::property_list{
@@ -336,6 +397,7 @@ private:
   }
 
 #ifdef MOM_SYCL_HAS_HIP
+  // Calculate the worst cached-input local-memory demand across this arena's collision stages.
   template <typename ActiveArena> static constexpr std::size_t cache_local_bytes() {
     return std::max(
         {mom_equihash::partitioned_collision_local_bytes<
@@ -376,6 +438,9 @@ private:
   std::uint32_t* counts_storage_ = nullptr;
   std::array<std::uint32_t*, 7> counts_{};
   unsigned profile_reports_ = 0;
+#if defined(MOM_SYCL_ADAPTIVECPP_CUDA)
+  int cuda_arena_ = -1;
+#endif
 #ifdef MOM_SYCL_HAS_HIP
   bool cache_partition_inputs_ = false;
 #endif
@@ -393,6 +458,7 @@ private:
     throw std::bad_alloc();
   }
 
+  // Check device headroom and allocate all retained levels; any partial failure releases owned storage.
   void allocate() {
     const auto device = queue_.get_device();
     const std::uint64_t required = Arena::arena_bytes +
@@ -432,11 +498,13 @@ private:
     }
   }
 
+  // Reset attempt counters in queue order; prior record bytes remain unreachable behind zero counts.
   void clear() {
     queue_.fill(counts_storage_, 0u, 7 * count_stride + 2);
   }
 
   template <typename T>
+  // Release one allocation without throwing and clear its pointer for partial-construction cleanup.
   void free(T*& value) noexcept {
     if (value) {
       try {
@@ -447,6 +515,7 @@ private:
     }
   }
 
+  // Release owned buffers and clear counter aliases; callers drain the queue first.
   void release() noexcept {
     free(input_);
     free(level0_);
