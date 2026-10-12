@@ -311,6 +311,12 @@ foreach ($runtime in @(
     throw "Windows release worker is missing required Unified Runtime file: $runtime"
   }
 }
+# Ship the KawPow source-JIT assets beside the DPC++ worker when present.
+if (Test-Path "sycl/kawpow/device.inc") {
+  # The CUDA source-JIT locates this relative to the loaded DPC++ sycl.dll.
+  Copy-Item "sycl/kawpow/device.inc" (Join-Path $libsDir 'dpcpp\kawpow_device.inc')
+  Copy-Item "sycl/kawpow/keccak.inc" (Join-Path $libsDir 'dpcpp\kawpow_keccak.inc')
+}
 # Dynamic NVRTC loads are invisible to dumpbin; ship the exact CUDA 13.4 compiler cohort.
 foreach ($worker in @('dpcpp', 'acpp-cuda')) {
   foreach ($name in @('nvrtc64_130_0.dll', 'nvrtc-builtins64_134.dll')) {
@@ -318,12 +324,6 @@ foreach ($worker in @('dpcpp', 'acpp-cuda')) {
     if (-not (Test-Path $source -PathType Leaf)) { throw "Missing CUDA 13.4 runtime: $source" }
     Copy-Item $source (Join-Path $libsDir "$worker\$name") -Force
   }
-}
-# Ship the KawPow source-JIT assets beside the DPC++ worker when present.
-if (Test-Path "sycl/kawpow/device.inc") {
-  # The CUDA source-JIT locates this relative to the loaded DPC++ sycl.dll.
-  Copy-Item "sycl/kawpow/device.inc" (Join-Path $libsDir 'dpcpp\kawpow_device.inc')
-  Copy-Item "sycl/kawpow/keccak.inc" (Join-Path $libsDir 'dpcpp\kawpow_keccak.inc')
 }
 $entryPaths = @("$packageDir/mom-node.exe")
 Copy-MominerDllClosure -PackageDir $libsDir -EntryPaths $entryPaths
