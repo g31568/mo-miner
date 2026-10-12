@@ -30,8 +30,8 @@ function Assert-Authenticode([string]$Path) {
 }
 
 $tempRoot = if ($env:TEMP) { $env:TEMP } elseif ($env:TMPDIR) { $env:TMPDIR } else { "/tmp" }
-$fallbackCudaToolkitUrl = "https://developer.download.nvidia.com/compute/cuda/12.6.0/network_installers/cuda_12.6.0_windows_network.exe"
-$cudaToolkitRoot = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6"
+$fallbackCudaToolkitUrl = "https://developer.download.nvidia.com/compute/cuda/13.4.2/network_installers/cuda_13.4.2_windows_x86_64_network.exe"
+$cudaToolkitRoot = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.4"
 $cudaNvrtcUrl = "https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvrtc/windows-x86_64/cuda_nvrtc-windows-x86_64-13.4.92-archive.zip"
 $cudaNvrtcSha256 = "92e4db6e79550665e1dbdc6cc09c934452a667881f5ed49a51681429874a8f0d"
 $openClCpuUrl = "https://registrationcenter-download.intel.com/akdlm/IRC_NAS/ad824c04-01c8-4ae5-b5e8-164a04f67609/w_opencl_runtime_p_2025.3.1.762.exe"
@@ -39,7 +39,7 @@ $sevenZipUrl = "https://www.7-zip.org/a/7z2409-x64.msi"
 $sevenZipSha256 = "ec6af1ea0367d16dde6639a89a080a524cebc4d4bedfe00ed0cac4b865a918d8"
 $fallbackVsBuildToolsUrl = "https://aka.ms/vs/17/release/vs_BuildTools.exe"
 $cudaToolkitPackages = @(
-  "nvcc_12.6", "cudart_12.6", "nvrtc_12.6", "nvrtc_dev_12.6"
+  "nvcc_13.4", "cudart_13.4", "nvrtc_13.4", "nvrtc_dev_13.4"
 )
 
 function Get-NvidiaPnpDevice {
@@ -149,14 +149,20 @@ function Get-NvidiaSmi {
 }
 
 function Get-CudaToolkitRoot {
-  $roots = @()
+  # Prefer the required release over an older inherited CUDA_PATH.
+  $roots = @($cudaToolkitRoot)
   if ($env:CUDA_PATH) { $roots += $env:CUDA_PATH }
   if ($env:CUDA_HOME) { $roots += $env:CUDA_HOME }
-  $roots += $cudaToolkitRoot
 
   foreach ($root in $roots | Select-Object -Unique) {
     if (-not $root) { continue }
-    $hasNvrtc = [bool](Get-ChildItem (Join-Path $root "bin") -Filter "nvrtc64_*.dll" `
+    $nvcc = Join-Path $root "bin\nvcc.exe"
+    if (-not (Test-Path $nvcc -PathType Leaf)) { continue }
+    # NVCC 13.4.92 is the compiler shipped in CUDA Toolkit 13.4.2.
+    $compilerVersion = (& $nvcc --version 2>$null) -join "`n"
+    if ($LASTEXITCODE -ne 0 -or $compilerVersion -notmatch '\bV13\.4\.92\b') { continue }
+    $runtimeDirs = @((Join-Path $root "bin"), (Join-Path $root "bin\x64"))
+    $hasNvrtc = [bool](Get-ChildItem $runtimeDirs -Filter "nvrtc64_130_0.dll" `
       -File -ErrorAction SilentlyContinue | Select-Object -First 1)
     if ((Test-Path (Join-Path $root "bin\ptxas.exe")) -and
         (Test-Path (Join-Path $root "nvvm\libdevice\libdevice.10.bc")) -and
@@ -175,8 +181,13 @@ function Test-CudaToolkitReady {
 
 function Test-CudaNvrtc {
   param([Parameter(Mandatory = $true)][string]$CudaRoot)
-  return ((Test-Path (Join-Path $CudaRoot "bin\nvrtc64_130_0.dll")) -and
-    (Test-Path (Join-Path $CudaRoot "bin\nvrtc-builtins64_134.dll")))
+  # CUDA 13 installers put runtime DLLs under bin/x64; redistributions may use bin.
+  foreach ($relative in @("bin", "bin\x64")) {
+    $bin = Join-Path $CudaRoot $relative
+    if ((Test-Path (Join-Path $bin "nvrtc64_130_0.dll")) -and
+        (Test-Path (Join-Path $bin "nvrtc-builtins64_134.dll"))) { return $true }
+  }
+  return $false
 }
 
 function Install-CudaNvrtc {
@@ -189,6 +200,8 @@ function Install-CudaNvrtc {
     throw "Run install.bat from an elevated Administrator command prompt."
   }
 
+  $runtimeDir = Join-Path $CudaRoot "bin\x64"
+  if (-not (Test-Path $runtimeDir)) { $runtimeDir = Join-Path $CudaRoot "bin" }
   $archive = Join-Path $tempRoot ("mom-cuda-nvrtc-{0}.zip" -f [Guid]::NewGuid().ToString('N'))
   Invoke-WebRequest -UseBasicParsing -Uri $cudaNvrtcUrl -OutFile $archive
   $actual = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
@@ -204,7 +217,7 @@ function Install-CudaNvrtc {
       $entry = $zip.Entries | Where-Object { $_.Name -eq $name } | Select-Object -First 1
       if (-not $entry) { throw "CUDA NVRTC archive does not contain $name" }
       [System.IO.Compression.ZipFileExtensions]::ExtractToFile(
-        $entry, (Join-Path $CudaRoot "bin\$name"), $true)
+        $entry, (Join-Path $runtimeDir $name), $true)
     }
   } finally {
     $zip.Dispose()
@@ -279,7 +292,8 @@ function Install-CudaToolkit([switch]$Force) {
     return
   }
   if (Test-CudaToolkitReady) {
-    Write-Host "CUDA toolkit headers, ptxas, and libdevice are already available; skipping CUDA toolkit install."
+    $env:CUDA_PATH = Get-CudaToolkitRoot
+    Write-Host "CUDA 13.4.2 toolkit is already available; skipping CUDA toolkit install."
     return
   }
   if (-not (Test-Administrator)) {
@@ -307,7 +321,7 @@ function Install-CudaToolkit([switch]$Force) {
   $cudaRoot = $cudaToolkitRoot
   if (Test-Path $cudaRoot) {
     $env:CUDA_PATH = $cudaRoot
-    $env:Path = (Join-Path $cudaRoot "bin") + ";" + $env:Path
+    $env:Path = (Join-Path $cudaRoot "bin\x64") + ";" + (Join-Path $cudaRoot "bin") + ";" + $env:Path
   }
   if (-not (Test-CudaToolkitReady)) {
     throw "CUDA toolkit install completed but required headers, ptxas, or libdevice were not found."
@@ -316,7 +330,7 @@ function Install-CudaToolkit([switch]$Force) {
 }
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$cutlassHelperSha256 = "319405c20146e2ad20324d2ae895e222c5e5b58fdad0cccb93d360995aada893"
+$cutlassHelperSha256 = "e3a83c8fbda36c2b3f3a62ed0d74df54f3d57e401cc65686c4be971d8193ab41"
 $needsCudaSupport = [bool]((Get-NvidiaPnpDevice) -or $InstallCudaToolkit)
 if ($needsCudaSupport) {
   $helper = Join-Path $scriptDir "install-cutlass.ps1"
@@ -326,7 +340,7 @@ if ($needsCudaSupport) {
     $helper = Join-Path $tempRoot ("mom-install-cutlass-{0}.ps1" -f [Guid]::NewGuid().ToString('N'))
     try {
       Invoke-WebRequest -UseBasicParsing `
-        -Uri "https://raw.githubusercontent.com/MoneroOcean/mo-miner/v0.9.0/scripts/install-cutlass.ps1" `
+        -Uri "https://raw.githubusercontent.com/g31568/mo-miner/22f26a9e3ee22bdbdd223435bad49c669bbd2ccf/scripts/install-cutlass.ps1" `
         -OutFile $helper
       $actual = (Get-FileHash -Algorithm SHA256 $helper).Hash.ToLowerInvariant()
       if ($actual -ne $cutlassHelperSha256) {

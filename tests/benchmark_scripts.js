@@ -463,7 +463,8 @@ test("standalone installers authenticate downloaded helper scripts", () => {
   assert.match(powershellInstaller,
     new RegExp(`cutlassHelperSha256 = "${powershellHash}"`, "i"));
   assert.match(powershellInstaller, /Get-FileHash -Algorithm SHA256 \$helper/);
-  assert.match(powershellInstaller, /mo-miner\/v0\.9\.0\/scripts\/install-cutlass\.ps1/);
+  // The updated Windows helper is pinned to an immutable fork commit.
+  assert.match(powershellInstaller, /g31568\/mo-miner\/[a-f0-9]{40}\/scripts\/install-cutlass\.ps1/);
   assert.doesNotMatch(powershellInstaller, /mo-miner\/master\/scripts\/install-cutlass\.ps1/);
   assert.match(powershellInstaller, /function Assert-Authenticode/);
   assert.match(powershellInstaller,
